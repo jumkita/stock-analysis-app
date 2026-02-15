@@ -2,6 +2,7 @@
 """
 Streamlit UI: SOTP理論株価 + 24種買い/26種売りパターン + 市場スクリーニング
 """
+import os
 import threading
 import time
 import streamlit as st
@@ -9,6 +10,22 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from backtest_engine import BacktestEngine, plot_backtest_results
+
+# ----- Gemini API Key Loading (Cloud: st.secrets | Local: env) -----
+try:
+    gemini_api_key = st.secrets["GEMINI_API_KEY"]
+    if not isinstance(gemini_api_key, str) or not gemini_api_key.strip():
+        gemini_api_key = ""
+    else:
+        gemini_api_key = gemini_api_key.strip()
+except (FileNotFoundError, KeyError):
+    gemini_api_key = ""
+
+if not gemini_api_key:
+    gemini_api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+
+api_ready = bool(gemini_api_key)
+GEMINI_SECRETS = {"GEMINI_API_KEY": gemini_api_key} if api_ready else {}
 from logic import (
     sotp_full,
     fetch_ohlcv,
@@ -321,6 +338,8 @@ def main():
 
     with st.sidebar:
         st.header("設定")
+        if not api_ready:
+            st.warning("⚠️ APIキーが設定されていません。AI分析機能は利用できません。")
         period = st.selectbox("分析期間", ["3mo", "6mo", "1y", "2y"], index=0)
         if mode == "単一銘柄分析":
             ticker = st.text_input("銘柄コード", value="8473.T", help="例: 7203.T, 8473.T")
@@ -373,8 +392,12 @@ def main():
 
         st.divider()
         with st.expander("Gemini API     疎通テスト"):
-            if st.button("実行（銘柄名: トヨタ）", key="gemini_test_btn"):
-                msg = gemini_echo_ticker("トヨタ", streamlit_secrets=st.secrets)
+            if st.button(
+                "実行（銘柄名: トヨタ）",
+                key="gemini_test_btn",
+                disabled=not api_ready,
+            ):
+                msg = gemini_echo_ticker("トヨタ", streamlit_secrets=GEMINI_SECRETS)
                 st.session_state.gemini_test_msg = msg
             if st.session_state.get("gemini_test_msg") is not None:
                 st.write(st.session_state.gemini_test_msg)
@@ -456,10 +479,7 @@ def main():
             }
             st.session_state.scan_shared = shared
 
-            try:
-                gemini_secrets = dict(st.secrets) if hasattr(st.secrets, "items") else {}
-            except Exception:
-                gemini_secrets = {}
+            gemini_secrets = GEMINI_SECRETS
 
             def worker(secrets_for_audit):
                 def on_progress(current: int, total: int, t: str):
@@ -477,7 +497,7 @@ def main():
                         recent_days=3,
                         progress_callback=on_progress,
                         stop_check=lambda: shared.get("stop", False),
-                        enable_gemini_audit=True,
+                        enable_gemini_audit=api_ready,
                         streamlit_secrets=secrets_for_audit,
                         audit_progress_callback=on_audit_progress,
                     )
