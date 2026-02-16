@@ -3,7 +3,6 @@
 Streamlit UI: SOTP理論株価 + 24種買い/26種売りパターン + 市場スクリーニング
 """
 import os
-import random
 import threading
 import time
 import streamlit as st
@@ -36,68 +35,7 @@ from logic import (
     get_sotp_suggested_multiple,
     gemini_echo_ticker,
 )
-from screener import run_screen
-
-STOCK_LIST_PATH = "stock_list.xls"
-PRIME_MARKET_LABEL = "プライム（内国株）"
-EMPTY_PRIME_DF = pd.DataFrame(columns=["ticker", "銘柄ラベル"])
-
-
-@st.cache_data(ttl=86400)
-def get_prime_stocks() -> pd.DataFrame:
-    """
-    ローカルの銘柄一覧（stock_list.xls）を読み、プライム市場の銘柄のみを返す。
-    キャッシュは 1 日（86400 秒）有効。
-    """
-    if not os.path.exists(STOCK_LIST_PATH):
-        st.error(
-            f"⚠️ 銘柄リスト（{STOCK_LIST_PATH}）が見つかりません。"
-            "JPXからダウンロードしてプロジェクトに配置してください。"
-        )
-        return EMPTY_PRIME_DF.copy()
-
-    try:
-        df = pd.read_excel(STOCK_LIST_PATH, engine="xlrd")
-    except FileNotFoundError:
-        st.error(
-            f"⚠️ 銘柄リスト（{STOCK_LIST_PATH}）が見つかりません。"
-            "リポジトリに配置してください。"
-        )
-        return EMPTY_PRIME_DF.copy()
-    except Exception as e:
-        st.error(f"銘柄リストの読み込みに失敗しました: {e}")
-        return EMPTY_PRIME_DF.copy()
-
-    df.columns = df.columns.astype(str).str.strip()
-    if "市場・商品区分" not in df.columns:
-        return EMPTY_PRIME_DF.copy()
-    df = df[df["市場・商品区分"] == PRIME_MARKET_LABEL].copy()
-    if df.empty:
-        return EMPTY_PRIME_DF.copy()
-
-    code_col = None
-    for c in ("コード", "コード（※）", "銘柄コード"):
-        if c in df.columns:
-            code_col = c
-            break
-    name_col = None
-    for c in ("銘柄名", "銘柄名称"):
-        if c in df.columns:
-            name_col = c
-            break
-    if code_col is None or name_col is None:
-        return EMPTY_PRIME_DF.copy()
-
-    df["_code"] = df[code_col].astype(str).str.strip().str.replace(r"\..*$", "", regex=True)
-    df["銘柄ラベル"] = df["_code"] + ": " + df[name_col].astype(str).str.strip()
-    df["ticker"] = df["_code"] + ".T"
-    out = (
-        df[["ticker", "銘柄ラベル"]]
-        .drop_duplicates(subset=["ticker"])
-        .sort_values("ticker")
-        .reset_index(drop=True)
-    )
-    return out
+from screener import TARGET_TICKERS, run_screen
 
 
 def _render_detail_chart(ticker: str, ebitda_mult: float, period: str) -> None:
@@ -404,26 +342,7 @@ def main():
             st.warning("⚠️ APIキーが設定されていません。AI分析機能は利用できません。")
         period = st.selectbox("分析期間", ["3mo", "6mo", "1y", "2y"], index=0)
         if mode == "単一銘柄分析":
-            prime_df = get_prime_stocks()
-            if not prime_df.empty:
-                options = prime_df["銘柄ラベル"].tolist()
-                default_idx = 0
-                default_ticker = "8473.T"
-                if default_ticker in prime_df["ticker"].tolist():
-                    default_idx = prime_df["ticker"].tolist().index(default_ticker)
-                selected_label = st.selectbox(
-                    "銘柄を選択（プライム市場）",
-                    options,
-                    index=default_idx,
-                    key="prime_stock_select",
-                )
-                ticker = prime_df[prime_df["銘柄ラベル"] == selected_label]["ticker"].iloc[0]
-            else:
-                ticker = st.text_input(
-                    "銘柄コード",
-                    value="8473.T",
-                    help="一覧の取得に失敗した場合はコードを直接入力してください。",
-                )
+            ticker = st.text_input("銘柄コード", value="8473.T", help="例: 7203.T, 8473.T")
             current_ticker = ticker
         else:
             ticker = None
@@ -483,24 +402,6 @@ def main():
             if st.session_state.get("gemini_test_msg") is not None:
                 st.write(st.session_state.gemini_test_msg)
 
-        if mode == "市場スキャンモード":
-            st.divider()
-            st.subheader("スキャン設定")
-            scan_count = st.slider(
-                "スキャン対象数",
-                min_value=1,
-                max_value=500,
-                value=50,
-                key="scan_count",
-                help="プライム市場からスキャンする銘柄数（最大500）",
-            )
-            use_random = st.checkbox(
-                "ランダム抽出",
-                value=True,
-                key="scan_random",
-                help="ON: ランダムに抽出 / OFF: コード順で先頭から",
-            )
-
     if mode == "単一銘柄分析":
         st.subheader(f"銘柄: {ticker}")
         _render_detail_chart(ticker, ebitda_mult, period)
@@ -508,12 +409,8 @@ def main():
 
     # ----- 市場スキャンモード -----
     st.subheader("市場スキャンモード")
-    scan_count = st.session_state.get("scan_count", 50)
-    use_random = st.session_state.get("scan_random", True)
-    scan_mode_text = "ランダム抽出" if use_random else "コード順"
     st.caption(
-        f"対象: プライム市場（{scan_count}銘柄・{scan_mode_text}）"
-        " — 乖離率20%以上 & 直近3日以内に買いパターン1つ以上"
+        f"対象: {len(TARGET_TICKERS)} 銘柄（日経225・乖離率20%以上 & 直近3日以内に買いパターン1つ以上）"
     )
 
     # スキャン中は進捗と中断ボタンを表示（スレッドで実行中のため）
@@ -574,62 +471,48 @@ def main():
     col_scan, col_stop = st.columns(2)
     with col_scan:
         if st.button("厳選銘柄をスキャン", type="primary", key="scan_start_btn"):
-            prime_df = get_prime_stocks()
-            all_tickers = prime_df["ticker"].tolist() if not prime_df.empty else []
-            if not all_tickers:
-                st.error("プライム市場の銘柄一覧を取得できませんでした。")
-            else:
-                n = st.session_state.get("scan_count", 50)
-                use_rnd = st.session_state.get("scan_random", True)
-                n = min(n, len(all_tickers))
-                if use_rnd:
-                    scan_tickers = random.sample(all_tickers, n)
-                else:
-                    scan_tickers = all_tickers[:n]
+            shared = {
+                "stop": False,
+                "progress": (0, len(TARGET_TICKERS), ""),
+                "audit_progress": None,
+                "partial_audit_results": None,
+                "result": None,
+                "stopped": False,
+            }
+            st.session_state.scan_shared = shared
 
-                shared = {
-                    "stop": False,
-                    "progress": (0, len(scan_tickers), ""),
-                    "audit_progress": None,
-                    "partial_audit_results": None,
-                    "result": None,
-                    "stopped": False,
-                }
-                st.session_state.scan_shared = shared
+            gemini_secrets = GEMINI_SECRETS
 
-                gemini_secrets = GEMINI_SECRETS
+            def worker(secrets_for_audit):
+                def on_progress(current: int, total: int, t: str):
+                    shared["progress"] = (current, total, t)
 
-                def worker(secrets_for_audit, tickers_to_scan):
-                    def on_progress(current: int, total: int, t: str):
-                        shared["progress"] = (current, total, t)
+                def on_audit_progress(done: int, total: int, msg: str, results_so_far=None):
+                    shared["audit_progress"] = (done, total, msg)
+                    if results_so_far is not None:
+                        shared["partial_audit_results"] = results_so_far
 
-                    def on_audit_progress(done: int, total: int, msg: str, results_so_far=None):
-                        shared["audit_progress"] = (done, total, msg)
-                        if results_so_far is not None:
-                            shared["partial_audit_results"] = results_so_far
+                try:
+                    data = run_screen(
+                        ebitda_multiple=ebitda_mult,
+                        min_deviation_pct=20.0,
+                        recent_days=3,
+                        progress_callback=on_progress,
+                        stop_check=lambda: shared.get("stop", False),
+                        enable_gemini_audit=api_ready,
+                        streamlit_secrets=secrets_for_audit,
+                        audit_progress_callback=on_audit_progress,
+                    )
+                    shared["result"] = data
+                    shared["stopped"] = shared.get("stop", False)
+                except Exception as e:
+                    shared["result"] = {"results": [], "debug": []}
+                    shared["error"] = str(e)
 
-                    try:
-                        data = run_screen(
-                            ebitda_multiple=ebitda_mult,
-                            min_deviation_pct=20.0,
-                            recent_days=3,
-                            progress_callback=on_progress,
-                            stop_check=lambda: shared.get("stop", False),
-                            enable_gemini_audit=api_ready,
-                            streamlit_secrets=secrets_for_audit,
-                            audit_progress_callback=on_audit_progress,
-                            tickers=tickers_to_scan,
-                        )
-                        shared["result"] = data
-                        shared["stopped"] = shared.get("stop", False)
-                    except Exception as e:
-                        shared["result"] = {"results": [], "debug": []}
-                        shared["error"] = str(e)
-
-                th = threading.Thread(target=worker, args=(gemini_secrets, scan_tickers))
-                st.session_state.scan_thread = th
-                th.start()
-                st.rerun()
+            th = threading.Thread(target=worker, args=(gemini_secrets,))
+            st.session_state.scan_thread = th
+            th.start()
+            st.rerun()
 
     if st.session_state.screen_results is not None:
         results = st.session_state.screen_results
