@@ -440,12 +440,17 @@ def main():
                     "buy_signals": "直近の買いサイン", "ai_rank": "AI判定",
                     "strategist_eye": "ストラテジストの眼", "verdict": "Verdict",
                 })
-                for c in ("現在値", "理論株価"):
-                    if c in df_part.columns:
-                        df_part[c] = df_part[c].apply(lambda x: f"¥{x:,.0f}" if x is not None else "—")
+                # 損切り目安を生の数値で計算してから表示用に整形
+                if "現在値" in df_part.columns:
+                    raw = df_part["現在値"]
+                    df_part["損切り目安"] = raw * 0.95
+                    df_part["現在値"] = raw.apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
+                    df_part["損切り目安"] = df_part["損切り目安"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
+                if "理論株価" in df_part.columns:
+                    df_part["理論株価"] = df_part["理論株価"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
                 if "乖離率(%)" in df_part.columns:
                     df_part["乖離率(%)"] = df_part["乖離率(%)"].apply(lambda x: f"{x:+.1f}%" if x is not None else "—")
-                cols = [c for c in ["銘柄コード", "銘柄名", "現在値", "理論株価", "乖離率(%)", "AI判定", "ストラテジストの眼", "Verdict", "直近の買いサイン"] if c in df_part.columns]
+                cols = [c for c in ["銘柄コード", "銘柄名", "現在値", "損切り目安", "理論株価", "乖離率(%)", "AI判定", "ストラテジストの眼", "Verdict", "直近の買いサイン"] if c in df_part.columns]
                 st.dataframe(df_part[cols], width="stretch")
         if st.button("中断", key="scan_stop_btn"):
             scan_shared["stop"] = True
@@ -536,9 +541,13 @@ def main():
                 "strategist_eye": "ストラテジストの眼",
                 "verdict": "Verdict",
             })
-            df_display["現在値"] = df_display["現在値"].apply(lambda x: f"¥{x:,.0f}")
-            df_display["理論株価"] = df_display["理論株価"].apply(lambda x: f"¥{x:,.0f}")
-            df_display["乖離率(%)"] = df_display["乖離率(%)"].apply(lambda x: f"{x:+.1f}%")
+            # 損切り目安を生の数値で計算してから表示用に整形
+            raw_price = df_display["現在値"]
+            df_display["損切り目安"] = raw_price * 0.95
+            df_display["現在値"] = raw_price.apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
+            df_display["損切り目安"] = df_display["損切り目安"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
+            df_display["理論株価"] = df_display["理論株価"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
+            df_display["乖離率(%)"] = df_display["乖離率(%)"].apply(lambda x: f"{x:+.1f}%" if x is not None and pd.notna(x) else "—")
             # Rank D の場合は Verdict を強制 AVOID に（理論株価が高くても注意）
             if "Verdict" in df_display.columns:
                 df_display["Verdict"] = df_display.apply(
@@ -546,7 +555,7 @@ def main():
                     axis=1,
                 )
             # 表示順
-            col_order = ["銘柄コード", "銘柄名", "現在値", "理論株価", "乖離率(%)", "AI判定", "ストラテジストの眼", "Verdict", "直近の買いサイン"]
+            col_order = ["銘柄コード", "銘柄名", "現在値", "損切り目安", "理論株価", "乖離率(%)", "AI判定", "ストラテジストの眼", "Verdict", "直近の買いサイン"]
             df_display = df_display[[c for c in col_order if c in df_display.columns]]
             # 行ハイライト: Rank A = 薄緑, Rank D = 薄赤
             def _row_style(row):
