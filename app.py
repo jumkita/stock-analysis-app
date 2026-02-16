@@ -38,30 +38,43 @@ from logic import (
 )
 from screener import run_screen
 
-JPX_LISTING_URL = (
-    "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
-)
+STOCK_LIST_PATH = "stock_list.xls"
 PRIME_MARKET_LABEL = "プライム（内国株）"
+EMPTY_PRIME_DF = pd.DataFrame(columns=["ticker", "銘柄ラベル"])
 
 
 @st.cache_data(ttl=86400)
 def get_prime_stocks() -> pd.DataFrame:
     """
-    JPX 東証上場銘柄一覧を取得し、プライム市場の銘柄のみを返す。
+    ローカルの銘柄一覧（stock_list.xls）を読み、プライム市場の銘柄のみを返す。
     キャッシュは 1 日（86400 秒）有効。
     """
+    if not os.path.exists(STOCK_LIST_PATH):
+        st.error(
+            f"⚠️ 銘柄リスト（{STOCK_LIST_PATH}）が見つかりません。"
+            "JPXからダウンロードしてプロジェクトに配置してください。"
+        )
+        return EMPTY_PRIME_DF.copy()
+
     try:
-        df = pd.read_excel(JPX_LISTING_URL)
-    except Exception:
-        return pd.DataFrame(columns=["ticker", "銘柄ラベル"])
+        df = pd.read_excel(STOCK_LIST_PATH, engine="xlrd")
+    except FileNotFoundError:
+        st.error(
+            f"⚠️ 銘柄リスト（{STOCK_LIST_PATH}）が見つかりません。"
+            "リポジトリに配置してください。"
+        )
+        return EMPTY_PRIME_DF.copy()
+    except Exception as e:
+        st.error(f"銘柄リストの読み込みに失敗しました: {e}")
+        return EMPTY_PRIME_DF.copy()
+
     df.columns = df.columns.astype(str).str.strip()
-    # 市場・商品区分でプライム（内国株）のみに絞る
     if "市場・商品区分" not in df.columns:
-        return pd.DataFrame(columns=["ticker", "銘柄ラベル"])
+        return EMPTY_PRIME_DF.copy()
     df = df[df["市場・商品区分"] == PRIME_MARKET_LABEL].copy()
     if df.empty:
-        return pd.DataFrame(columns=["ticker", "銘柄ラベル"])
-    # コード列（名前の揺れに対応）
+        return EMPTY_PRIME_DF.copy()
+
     code_col = None
     for c in ("コード", "コード（※）", "銘柄コード"):
         if c in df.columns:
@@ -73,11 +86,17 @@ def get_prime_stocks() -> pd.DataFrame:
             name_col = c
             break
     if code_col is None or name_col is None:
-        return pd.DataFrame(columns=["ticker", "銘柄ラベル"])
+        return EMPTY_PRIME_DF.copy()
+
     df["_code"] = df[code_col].astype(str).str.strip().str.replace(r"\..*$", "", regex=True)
     df["銘柄ラベル"] = df["_code"] + ": " + df[name_col].astype(str).str.strip()
     df["ticker"] = df["_code"] + ".T"
-    out = df[["ticker", "銘柄ラベル"]].drop_duplicates(subset=["ticker"]).sort_values("ticker").reset_index(drop=True)
+    out = (
+        df[["ticker", "銘柄ラベル"]]
+        .drop_duplicates(subset=["ticker"])
+        .sort_values("ticker")
+        .reset_index(drop=True)
+    )
     return out
 
 
