@@ -49,6 +49,14 @@ class BacktestEngine:
             if c not in df.columns:
                 raise ValueError(f"DataFrame に必須列 '{c}' がありません")
 
+        # データのサニタイズ（計算前に必ず数値化。文字列混入で結果が 0 になるのを防ぐ）
+        for col in ("Open", "High", "Low", "Close"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.replace("¥", "", regex=False).str.replace(",", "", regex=False),
+                    errors="coerce",
+                )
+
         results = []
         for col in signal_columns:
             if col not in df.columns:

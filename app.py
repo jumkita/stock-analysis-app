@@ -440,12 +440,15 @@ def main():
                     "buy_signals": "直近の買いサイン", "ai_rank": "AI判定",
                     "strategist_eye": "ストラテジストの眼", "verdict": "Verdict",
                 })
-                # 損切り目安を生の数値で計算してから表示用に整形
+                # 強制数値化してから損切り目安を計算・表示用に整形
                 if "現在値" in df_part.columns:
-                    raw = df_part["現在値"]
+                    raw = pd.to_numeric(
+                        df_part["現在値"].astype(str).str.replace("¥", "", regex=False).str.replace(",", "", regex=False),
+                        errors="coerce",
+                    )
                     df_part["損切り目安"] = raw * 0.95
-                    df_part["現在値"] = raw.apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
-                    df_part["損切り目安"] = df_part["損切り目安"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
+                    df_part["現在値"] = raw.apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) and x == x and x > 0 else "—")
+                    df_part["損切り目安"] = df_part["損切り目安"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) and x == x and x > 0 else "—")
                 if "理論株価" in df_part.columns:
                     df_part["理論株価"] = df_part["理論株価"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
                 if "乖離率(%)" in df_part.columns:
@@ -541,12 +544,21 @@ def main():
                 "strategist_eye": "ストラテジストの眼",
                 "verdict": "Verdict",
             })
-            # 損切り目安を生の数値で計算してから表示用に整形
+            # 強制数値化（文字列 '¥3,489' 混入で損切りが 0 になるのを防ぐ）
+            df_display["現在値"] = pd.to_numeric(
+                df_display["現在値"].astype(str).str.replace("¥", "", regex=False).str.replace(",", "", regex=False),
+                errors="coerce",
+            )
+            df_display["理論株価"] = pd.to_numeric(
+                df_display["理論株価"].astype(str).str.replace("¥", "", regex=False).str.replace(",", "", regex=False),
+                errors="coerce",
+            )
+            # 損切り目安を数値で計算してから表示用に整形
             raw_price = df_display["現在値"]
             df_display["損切り目安"] = raw_price * 0.95
-            df_display["現在値"] = raw_price.apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
-            df_display["損切り目安"] = df_display["損切り目安"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
-            df_display["理論株価"] = df_display["理論株価"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) else "—")
+            df_display["現在値"] = raw_price.apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) and x == x and x > 0 else "—")
+            df_display["損切り目安"] = df_display["損切り目安"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) and x == x and x > 0 else "—")
+            df_display["理論株価"] = df_display["理論株価"].apply(lambda x: f"¥{int(x):,}" if x is not None and pd.notna(x) and x == x else "—")
             df_display["乖離率(%)"] = df_display["乖離率(%)"].apply(lambda x: f"{x:+.1f}%" if x is not None and pd.notna(x) else "—")
             # Rank D の場合は Verdict を強制 AVOID に（理論株価が高くても注意）
             if "Verdict" in df_display.columns:

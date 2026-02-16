@@ -7,6 +7,8 @@ import copy
 import time
 from typing import Callable, Optional
 
+import pandas as pd
+
 from logic import (
     sotp_full,
     fetch_ohlcv,
@@ -169,7 +171,17 @@ def run_screen(
             })
             continue
 
-        current = sotp.get("current_price")
+        # 取得値を強制数値化（'¥3,489' 等の文字列混入に備える）
+        _raw = sotp.get("current_price")
+        current = None
+        if _raw is not None:
+            try:
+                current = pd.to_numeric(str(_raw).replace("¥", "").replace(",", ""), errors="coerce")
+            except (TypeError, ValueError):
+                current = None
+        if current is None or (pd.isna(current) or current <= 0):
+            current = None
+
         theoretical = sotp.get("theoretical_price")
         deviation_pct = sotp.get("deviation_pct")
         model_type = sotp.get("model_type") or "—"
@@ -202,6 +214,14 @@ def run_screen(
         if df is None or len(df) < 2:
             continue
 
+        # OHLC を強制数値化（文字列混入で計算が 0 になるのを防ぐ）
+        for col in ("Open", "High", "Low", "Close"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.replace("¥", "", regex=False).str.replace(",", "", regex=False),
+                    errors="coerce",
+                )
+
         try:
             patterns = detect_all_patterns(df)
         except Exception:
@@ -219,10 +239,13 @@ def run_screen(
             continue
 
         name = get_ticker_name(ticker)
+        # 損切り目安は数値のまま計算（表示用整形は app 側で実施）
+        stop_loss_price = float(current * 0.95) if current and current > 0 else None
         record = {
             "ticker": ticker,
             "name": name,
             "current_price": current,
+            "stop_loss_price": stop_loss_price,
             "theoretical_price": theoretical,
             "deviation_pct": round(deviation_pct, 1),
             "buy_signals": ", ".join(buy_in_recent) if buy_in_recent else "",
