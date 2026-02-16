@@ -136,18 +136,21 @@ def run_screen(
     enable_gemini_audit: bool = False,
     streamlit_secrets: Optional[object] = None,
     audit_progress_callback: Optional[Callable[..., None]] = None,
+    tickers: Optional[list[str]] = None,
 ) -> dict:
     """
     注目銘柄リストを一括スキャンし、条件を満たす銘柄を返す。デバッグ用に全銘柄の結果も返す。
+    tickers を渡した場合はそのリストを使用。未指定時は TARGET_TICKERS（日経225）を使用。
     条件: 乖離率 >= min_deviation_pct かつ 直近 recent_days 日以内に買いパターンが1つ以上。
     各リクエスト間に time.sleep(1.0) でAPI制限を回避。
     戻り値: {"results": [...], "debug": [{Ticker, Price, Model Type, Theoretical Price, Upside (%), Status}, ...]}
     """
     results = []
     debug_list = []
-    total = len(TARGET_TICKERS)
+    target_list = tickers if tickers is not None else TARGET_TICKERS
+    total = len(target_list)
 
-    for idx, ticker in enumerate(TARGET_TICKERS):
+    for idx, ticker in enumerate(target_list):
         if stop_check and stop_check():
             break
         if progress_callback:
