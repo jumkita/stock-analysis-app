@@ -14,7 +14,7 @@ import pandas as pd
 class BacktestEngine:
     """
     テクニカルシグナルの有効性を検証するバックテストエンジン。
-    vectorized operation を活用し、複数シグナルの一括検証を高速に行う。
+    1トレードずつ for ループでエントリー・損切り・期間満了を判定する。
     """
 
     def run(
@@ -59,6 +59,16 @@ class BacktestEngine:
             if metrics is not None:
                 metrics["Signal Name"] = col
                 results.append(metrics)
+            else:
+                results.append({
+                    "Signal Name": col,
+                    "Total Trades": 0,
+                    "Win Rate": 0.0,
+                    "Profit Factor": 0.0,
+                    "Avg Return": 0.0,
+                    "Max Drawdown": 0.0,
+                    "Expectancy": 0.0,
+                })
 
         if not results:
             return pd.DataFrame(
@@ -82,37 +92,52 @@ class BacktestEngine:
         holding_period_days: int,
         stop_loss_pct: Optional[float],
     ) -> Optional[dict]:
-        """単一シグナル列のバックテストを実行。"""
-        mask = df[signal_col].fillna(False).astype(bool)
-        entry_indices = np.where(mask)[0]
-
-        if len(entry_indices) == 0:
+        """単一シグナル列のバックテストを実行（1トレードずつ for ループで判定）。"""
+        if df.empty or holding_period_days < 1:
             return None
 
-        n = len(df)
-        close = df["Close"].values.astype(float)
-        low = df["Low"].values.astype(float)
+        mask = df[signal_col].fillna(False).astype(bool)
+        # シグナルが True の行の整数位置
+        entry_positions = [i for i in range(len(df)) if mask.iloc[i]]
 
-        entry_prices = close[entry_indices]
-        exit_indices = np.minimum(entry_indices + holding_period_days, n - 1)
+        trades_returns: list[float] = []
 
-        if stop_loss_pct is not None and stop_loss_pct > 0:
-            stop_prices = entry_prices * (1 - stop_loss_pct)
-            returns_list = []
-            for k, idx in enumerate(entry_indices):
-                window_end = min(idx + holding_period_days + 1, n)
-                low_window = low[idx + 1 : window_end]
-                hit_mask = low_window < stop_prices[k]
-                if np.any(hit_mask):
-                    ret = (stop_prices[k] - entry_prices[k]) / entry_prices[k]
-                else:
-                    ret = (close[exit_indices[k]] - entry_prices[k]) / entry_prices[k]
-                returns_list.append(ret)
-            returns = np.array(returns_list)
-        else:
-            exit_prices = close[exit_indices]
-            returns = (exit_prices - entry_prices) / entry_prices
-        return self._compute_metrics(returns)
+        for i in entry_positions:
+            if i + 1 >= len(df):
+                continue
+
+            entry_price = float(df["Close"].iloc[i])
+            if entry_price <= 0:
+                continue
+
+            use_stop = stop_loss_pct is not None and stop_loss_pct > 0
+            stop_price = entry_price * (1 - stop_loss_pct) if use_stop else None
+
+            exit_price: Optional[float] = None
+
+            for d in range(1, holding_period_days + 1):
+                if i + d >= len(df):
+                    exit_price = float(df["Close"].iloc[-1])
+                    break
+
+                current_low = float(df["Low"].iloc[i + d])
+                current_close = float(df["Close"].iloc[i + d])
+
+                if use_stop and stop_price is not None and current_low <= stop_price:
+                    exit_price = stop_price
+                    break
+
+                if d == holding_period_days:
+                    exit_price = current_close
+                    break
+
+            if exit_price is not None and entry_price > 0:
+                ret = (exit_price - entry_price) / entry_price
+                trades_returns.append(ret)
+
+        if not trades_returns:
+            return None
+        return self._compute_metrics(np.array(trades_returns))
 
     def _compute_metrics(self, returns: np.ndarray) -> dict:
         """リターン配列から指標を計算。"""
