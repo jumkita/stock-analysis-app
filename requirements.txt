@@ -6,3 +6,5 @@ yfinance
 mplfinance
 matplotlib
 google-genai
+openpyxl
+xlrd
