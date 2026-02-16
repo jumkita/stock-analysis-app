@@ -82,9 +82,9 @@ def _render_detail_chart(ticker: str, ebitda_mult: float, period: str) -> None:
         patterns = []
     downtrend_mask = get_downtrend_mask(df, window=25)
     latest_close = float(df["Close"].iloc[-1]) if len(df) > 0 else None
-    stop_loss = round(latest_close * 0.95) if latest_close and latest_close > 0 else None
-    if stop_loss is not None:
-        st.caption(f"損切りライン（現在値×0.95）: ¥{stop_loss:,.0f}")
+    stop_loss_price = round(latest_close * 0.95) if latest_close and latest_close > 0 else None
+    if stop_loss_price is not None:
+        st.caption(f"損切りライン（現在値×0.95）: ¥{stop_loss_price:,.0f}")
 
     # バックテスト用: patterns から Buy_* / Sell_* 列を df に追加
     for i, name, side in patterns:
@@ -102,7 +102,7 @@ def _render_detail_chart(ticker: str, ebitda_mult: float, period: str) -> None:
 
     if enable_backtest:
         holding_days = st.sidebar.slider("保有期間 (営業日)", 3, 20, 5)
-        stop_loss = st.sidebar.slider("損切りライン (%)", 1.0, 10.0, 5.0) / 100.0
+        stop_loss_pct = st.sidebar.slider("損切りライン (%)", 1.0, 10.0, 5.0) / 100.0
         min_win_rate = st.sidebar.slider("採用する最低勝率 (%)", 0, 100, 50)
 
         if signal_cols:
@@ -111,7 +111,7 @@ def _render_detail_chart(ticker: str, ebitda_mult: float, period: str) -> None:
                 df,
                 signal_columns=signal_cols,
                 holding_period_days=holding_days,
-                stop_loss_pct=stop_loss,
+                stop_loss_pct=stop_loss_pct,
             )
             # Total Trades が 5 回未満のシグナルを除外（統計的信頼性）
             results = raw_results[raw_results["Total Trades"] >= 5].copy()
@@ -281,8 +281,8 @@ def _render_detail_chart(ticker: str, ebitda_mult: float, period: str) -> None:
                 hovertemplate="%{hovertext}<extra></extra>",
             )
         )
-    if stop_loss is not None:
-        fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"損切り ¥{stop_loss:,.0f}")
+    if stop_loss_price is not None:
+        fig.add_hline(y=stop_loss_price, line_dash="dash", line_color="red", annotation_text=f"損切り ¥{stop_loss_price:,.0f}")
     fig.update_layout(
         title=f"{ticker} ローソク足 & パターン",
         xaxis_title="日付", yaxis_title="株価",
