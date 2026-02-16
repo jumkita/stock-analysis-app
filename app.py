@@ -81,9 +81,10 @@ def _render_detail_chart(ticker: str, ebitda_mult: float, period: str) -> None:
     except Exception:
         patterns = []
     downtrend_mask = get_downtrend_mask(df, window=25)
-    stop_loss = calc_stop_loss_line(df, lookback=20)
+    latest_close = float(df["Close"].iloc[-1]) if len(df) > 0 else None
+    stop_loss = round(latest_close * 0.95) if latest_close and latest_close > 0 else None
     if stop_loss is not None:
-        st.caption(f"損切りライン（直近20日安値）: ¥{stop_loss:,.0f}")
+        st.caption(f"損切りライン（現在値×0.95）: ¥{stop_loss:,.0f}")
 
     # バックテスト用: patterns から Buy_* / Sell_* 列を df に追加
     for i, name, side in patterns:
@@ -281,7 +282,7 @@ def _render_detail_chart(ticker: str, ebitda_mult: float, period: str) -> None:
             )
         )
     if stop_loss is not None:
-        fig.add_hline(y=stop_loss, line_dash="dash", line_color="gray", annotation_text="損切りライン")
+        fig.add_hline(y=stop_loss, line_dash="dash", line_color="red", annotation_text=f"損切り ¥{stop_loss:,.0f}")
     fig.update_layout(
         title=f"{ticker} ローソク足 & パターン",
         xaxis_title="日付", yaxis_title="株価",
