@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-金融分析ロジック: SOTP理論株価算出 + 24種買い / 26種売りパターン検知
-Ambiguous 対策済み。Model A/B/C 統合。app/screener 互換の API を提供。
+金融分析ロジック: 理論株価算出 (EV/EBITDA + ROE連動PBR) + 24種買い / 26種売りパターン検知
+Ambiguous 対策済み。Model A (Business) / B (Financials) の2軸。app/screener 互換の API を提供。
 """
 from __future__ import annotations
 
@@ -96,23 +96,21 @@ def fuzzy_get_value(df, keywords):
 
 def select_valuation_logic(data):
     """
-    業種・セクターに基づいて評価モデルを選択する
+    業種・セクターに基づいて評価モデルを選択する（2軸）。
+    Model B: 金融・不動産（負債を事業原資とするセクター）
+    Model A: それ以外すべて（一般事業会社）
     """
     industry = _safe_str(data.get("industry", "")).lower()
     sector = _safe_str(data.get("sector", "")).lower()
-
     search_text = f"{industry} {sector}"
 
-    # Model C: Hybrid (SBI, 商社, 証券)
-    if any(x in search_text for x in ["capital markets", "trading companies", "conglomerates", "diversified financial", "securities", "商社", "証券", "financial conglomerates"]):
-        return "C", "Hybrid (Earnings + Assets)"
+    if any(x in search_text for x in (
+        "banks", "insurance", "real estate",
+        "銀行", "保険", "不動産", "financial",
+    )):
+        return "B", "ROE-linked PBR"
 
-    # Model B: Asset Focus (銀行, 保険)
-    if any(x in search_text for x in ["banks", "insurance", "real estate", "銀行", "保険", "不動産"]):
-        return "B", "Asset Focus (PBR)"
-
-    # Model A: Earnings Focus (その他)
-    return "A", "Earnings Focus (EBITDA)"
+    return "A", "EV/EBITDA"
 
 
 def get_sotp_data(ticker):
@@ -211,8 +209,9 @@ def get_sotp_data(ticker):
 
 def calculate_sotp(ticker_symbol, ebitda_multiple: Optional[float] = None):
     """
-    SOTP計算のメイン関数。
-    ebitda_multiple が指定されている場合は Model A でその値を優先して使用する。
+    理論株価算出のメイン関数。
+    Model A: EV/EBITDA（一般事業会社）
+    Model B: ROE 連動 PBR（金融・不動産）
     """
     try:
         ticker = yf.Ticker(ticker_symbol)
@@ -227,53 +226,58 @@ def calculate_sotp(ticker_symbol, ebitda_multiple: Optional[float] = None):
         if shares == 0:
             shares = 1
 
+        # --- Insolvency Check: 債務超過は強制シャットアウト ---
+        if data["total_equity"] <= 0:
+            return {
+                "ticker": ticker_symbol,
+                "current_price": data["current_price"],
+                "theoretical_price": 0.0,
+                "upside": -100.0,
+                "model_name": "Avoid",
+                "details": "Avoid: Negative Equity (債務超過)",
+                "raw_data": data,
+            }
+
         target_price = 0.0
         details = ""
 
-        if model_id == "C":
-            if data["net_income"] < 0:
-                enterprise_value = data["total_equity"] * 1.0
-                details = "Model C (Defensive): Equity x 1.0 (Net Loss)"
-            else:
-                earnings_val = data["net_income"] * 10.0
-                asset_val = data["total_equity"] * 0.5
-                enterprise_value = earnings_val + asset_val
-                details = "Model C: Income x 10 + Equity x 0.5"
-            target_price = enterprise_value / shares
-
-        elif model_id == "B":
+        if model_id == "B":
+            # --- Model B: ROE-linked PBR（東証基準 + 赤字ペナルティ） ---
             bps = data["total_equity"] / shares
             roe = data["roe"]
             if roe >= 0.08:
                 target_pbr = 1.2
-                pbr_label = "ROE≥8%"
             elif roe >= 0.05:
                 target_pbr = 1.0
-                pbr_label = "5%≤ROE<8%"
-            else:
+            elif roe >= 0.0:
                 target_pbr = 0.6
-                pbr_label = "ROE<5%"
+            else:
+                target_pbr = 0.4
             target_price = bps * target_pbr
-            details = f"Model B: BPS x {target_pbr} ({pbr_label}, ROE {roe:.1%})"
+            details = f"Model B: ROE-linked PBR (Target: {target_pbr}倍)"
 
         else:
+            # --- Model A: Acquirer's Multiple (EV/EBITDA) ---
             if ebitda_multiple is not None:
                 base_multiple = float(ebitda_multiple)
-                mult_label = "UI指定"
             else:
-                base_multiple = 10.0
-                mult_label = "Base"
-                if "technology" in _safe_str(data.get("sector", "")).lower():
-                    base_multiple = 12.0
-                    mult_label = "Tech"
-                if "automotive" in _safe_str(data.get("industry", "")).lower():
+                base_multiple = 8.0
+                industry_lower = _safe_str(data.get("industry", "")).lower()
+                sector_lower = _safe_str(data.get("sector", "")).lower()
+                if "automotive" in industry_lower or "auto" in industry_lower:
                     base_multiple = 6.0
-                    mult_label = "Auto"
-            ev = data["ebitda"] * base_multiple
-            net_cash = data["total_cash"] - data["total_debt"]
-            equity_value = ev + net_cash
-            target_price = equity_value / shares
-            details = f"Model A: EBITDA x {base_multiple} ({mult_label})"
+                elif "technology" in sector_lower:
+                    base_multiple = 12.0
+
+            ebitda = data["ebitda"]
+            if ebitda > 0:
+                ev = ebitda * base_multiple
+                equity_value = ev + data["total_cash"] - data["total_debt"]
+                target_price = equity_value / shares
+                details = f"Model A: EV/EBITDA ({base_multiple}倍)"
+            else:
+                target_price = (data["total_equity"] * 0.5) / shares
+                details = "Model A: 解散価値 (Equity×0.5, EBITDA≤0)"
 
         return {
             "ticker": ticker_symbol,
@@ -423,7 +427,7 @@ def suggest_ebitda_multiple(
 
 
 def get_sotp_suggested_multiple(ticker_symbol: str) -> dict[str, Any]:
-    """銘柄の業種に応じた提案倍率。Model B/C では multiplier_disabled=True。"""
+    """銘柄の業種に応じた提案倍率。Model B では multiplier_disabled=True。"""
     try:
         ticker = yf.Ticker(ticker_symbol)
         raw = get_sotp_data(ticker)
@@ -431,25 +435,23 @@ def get_sotp_suggested_multiple(ticker_symbol: str) -> dict[str, Any]:
         raw = None
     if raw is None:
         return {
-            "suggested_multiple": 6.0,
-            "base": 6.0,
+            "suggested_multiple": 8.0,
+            "base": 8.0,
             "sector_label": "—",
             "is_financial": False,
-            "is_investment_conglomerate": False,
             "multiplier_disabled": False,
             "valuation_logic": None,
         }
     model_id, logic_name = select_valuation_logic(raw)
-    multiplier_disabled = model_id != "A"
+    multiplier_disabled = model_id == "B"
     sector = _safe_str(raw.get("sector") or "")
     industry = _safe_str(raw.get("industry") or "")
     suggested, base, label = suggest_ebitda_multiple(sector, industry, 0.0, 0.0)
     return {
-        "suggested_multiple": None if multiplier_disabled else (suggested if suggested is not None else 6.0),
+        "suggested_multiple": None if multiplier_disabled else (suggested if suggested is not None else 8.0),
         "base": base,
         "sector_label": label,
         "is_financial": _is_financial_sector(sector),
-        "is_investment_conglomerate": multiplier_disabled,
         "multiplier_disabled": multiplier_disabled,
         "valuation_logic": logic_name,
     }

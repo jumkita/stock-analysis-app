@@ -9,6 +9,7 @@ from typing import Callable, Optional
 
 import pandas as pd
 
+from backtest_engine import BacktestEngine
 from logic import (
     sotp_full,
     fetch_ohlcv,
@@ -138,17 +139,21 @@ def run_screen(
     enable_gemini_audit: bool = False,
     streamlit_secrets: Optional[object] = None,
     audit_progress_callback: Optional[Callable[..., None]] = None,
+    holding_days: int = 5,
+    stop_loss_pct: float = 0.05,
+    min_win_rate: float = 0.5,
 ) -> dict:
     """
-    注目銘柄リストを一括スキャンし、条件を満たす銘柄を返す。デバッグ用に全銘柄の結果も返す。
-    対象は TARGET_TICKERS（日経225）。
-    条件: 乖離率 >= min_deviation_pct かつ 直近 recent_days 日以内に買いパターンが1つ以上。
-    各リクエスト間に time.sleep(1.0) でAPI制限を回避。
-    戻り値: {"results": [...], "debug": [{Ticker, Price, Model Type, Theoretical Price, Upside (%), Status}, ...]}
+    注目銘柄リストを一括スキャンし、条件を満たす銘柄を返す。
+    条件: 直近 recent_days 以内に「勝率・収益性の高いサイン」（バックテストで Win Rate >= min_win_rate,
+    Profit Factor >= 1.0, Total Trades >= 5 を満たすシグナル）が1つ以上出た銘柄。
+    さらに乖離率 >= min_deviation_pct の場合は表示（min_deviation_pct=0 なら乖離率は問わない）。
+    戻り値: {"results": [...], "debug": [...]}
     """
     results = []
     debug_list = []
     total = len(TARGET_TICKERS)
+    engine = BacktestEngine()
 
     for idx, ticker in enumerate(TARGET_TICKERS):
         if stop_check and stop_check():
@@ -159,62 +164,20 @@ def run_screen(
         time.sleep(SCREENER_SLEEP_SECONDS)
 
         try:
-            sotp = sotp_full(ticker, ebitda_multiple=ebitda_multiple)
-        except Exception as e:
+            df = fetch_ohlcv(ticker, period="1mo", interval="1d")
+        except Exception:
             debug_list.append({
                 "ticker": ticker,
                 "price": None,
                 "model_type": "—",
                 "theoretical_price": None,
                 "upside_pct": None,
-                "status": "Error",
+                "status": "OHLC Error",
             })
-            continue
-
-        # 取得値を強制数値化（'¥3,489' 等の文字列混入に備える）
-        _raw = sotp.get("current_price")
-        current = None
-        if _raw is not None:
-            try:
-                current = pd.to_numeric(str(_raw).replace("¥", "").replace(",", ""), errors="coerce")
-            except (TypeError, ValueError):
-                current = None
-        if current is None or (pd.isna(current) or current <= 0):
-            current = None
-
-        theoretical = sotp.get("theoretical_price")
-        deviation_pct = sotp.get("deviation_pct")
-        model_type = sotp.get("model_type") or "—"
-        status = "Success" if (theoretical is not None and current is not None) else "Error"
-        if theoretical is not None and current is not None and current > 0:
-            upside = round((theoretical - current) / current * 100, 1) if deviation_pct is None else round(deviation_pct, 1)
-        else:
-            upside = None
-
-        debug_list.append({
-            "ticker": ticker,
-            "price": current,
-            "model_type": model_type,
-            "theoretical_price": theoretical,
-            "upside_pct": upside,
-            "status": status,
-        })
-
-        if deviation_pct is None or deviation_pct < min_deviation_pct:
-            continue
-        if current is None or theoretical is None:
-            continue
-
-        time.sleep(SCREENER_SLEEP_SECONDS)
-
-        try:
-            df = fetch_ohlcv(ticker, period="1mo", interval="1d")
-        except Exception:
             continue
         if df is None or len(df) < 2:
             continue
 
-        # OHLC を強制数値化（文字列混入で計算が 0 になるのを防ぐ）
         for col in ("Open", "High", "Low", "Close"):
             if col in df.columns:
                 df[col] = pd.to_numeric(
@@ -227,19 +190,90 @@ def run_screen(
         except Exception:
             patterns = []
 
-        downtrend_mask = get_downtrend_mask(df, window=25)
-        n = len(df)
-        buy_in_recent = [
-            name for i, name, side in patterns
-            if side == "buy"
-            and i >= n - recent_days
-            and (i >= len(downtrend_mask) or not downtrend_mask.iloc[i])
+        for i, name, side in patterns:
+            col = f"Buy_{name}" if side == "buy" else f"Sell_{name}"
+            if col not in df.columns:
+                df[col] = False
+            df.loc[df.index[i], col] = True
+
+        signal_cols = [c for c in df.columns if c.startswith("Buy_")]
+        if not signal_cols:
+            continue
+
+        try:
+            bt_results = engine.run(
+                df,
+                signal_columns=signal_cols,
+                holding_period_days=holding_days,
+                stop_loss_pct=stop_loss_pct,
+            )
+        except Exception:
+            continue
+
+        valid_results = bt_results[
+            (bt_results["Total Trades"] >= 5)
+            & (bt_results["Win Rate"] >= min_win_rate)
+            & (bt_results["Profit Factor"] >= 1.0)
         ]
-        if not buy_in_recent:
+        valid_signals = valid_results["Signal Name"].tolist()
+        if not valid_signals:
+            continue
+
+        n = len(df)
+        fired_valid = []
+        for i in range(max(0, n - recent_days), n):
+            for sig in valid_signals:
+                if sig in df.columns and df[sig].iloc[i]:
+                    label = sig.replace("Buy_", "")
+                    if label not in fired_valid:
+                        fired_valid.append(label)
+        if not fired_valid:
+            continue
+
+        time.sleep(SCREENER_SLEEP_SECONDS)
+        try:
+            sotp = sotp_full(ticker, ebitda_multiple=ebitda_multiple)
+        except Exception:
+            debug_list.append({
+                "ticker": ticker,
+                "price": None,
+                "model_type": "—",
+                "theoretical_price": None,
+                "upside_pct": None,
+                "status": "SOTP Error",
+            })
+            continue
+
+        _raw = sotp.get("current_price")
+        current = None
+        if _raw is not None:
+            try:
+                current = pd.to_numeric(str(_raw).replace("¥", "").replace(",", ""), errors="coerce")
+            except (TypeError, ValueError):
+                current = None
+        if current is not None and (pd.isna(current) or current <= 0):
+            current = None
+
+        theoretical = sotp.get("theoretical_price")
+        deviation_pct = sotp.get("deviation_pct")
+        if theoretical is not None and current is not None and current > 0:
+            deviation_pct = round((theoretical - current) / current * 100, 1) if deviation_pct is None else round(deviation_pct, 1)
+        else:
+            deviation_pct = None
+
+        debug_list.append({
+            "ticker": ticker,
+            "price": current,
+            "model_type": sotp.get("model_type") or "—",
+            "theoretical_price": theoretical,
+            "upside_pct": deviation_pct,
+            "status": "Success",
+        })
+
+        if min_deviation_pct > 0 and (deviation_pct is None or deviation_pct < min_deviation_pct):
             continue
 
         name = get_ticker_name(ticker)
-        # 損切り目安は数値のまま計算（表示用整形は app 側で実施）
         stop_loss_price = float(current * 0.95) if current and current > 0 else None
         record = {
             "ticker": ticker,
@@ -247,15 +281,15 @@ def run_screen(
             "current_price": current,
             "stop_loss_price": stop_loss_price,
             "theoretical_price": theoretical,
-            "deviation_pct": round(deviation_pct, 1),
-            "buy_signals": ", ".join(buy_in_recent) if buy_in_recent else "",
+            "deviation_pct": deviation_pct,
+            "buy_signals": ", ".join(fired_valid),
             "ai_rank": "—",
             "strategist_eye": "",
             "verdict": "OK",
         }
         results.append(record)
 
-    results.sort(key=lambda x: x["deviation_pct"], reverse=True)
+    results.sort(key=lambda x: (x["deviation_pct"] if x.get("deviation_pct") is not None else -999), reverse=True)
 
     # 監査は3銘柄ごとのバッチで実行し、バッチごとに結果を画面へ反映（ファンダメンタル注入）
     if enable_gemini_audit and results:
