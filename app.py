@@ -36,6 +36,7 @@ from logic import (
     gemini_echo_ticker,
 )
 from screener import TARGET_TICKERS, run_screen
+from auto_post import scan_buy_signal_only, build_tweet
 
 
 def _render_detail_chart(ticker: str, ebitda_mult: float, period: str) -> None:
@@ -350,35 +351,27 @@ def main():
             current_ticker = None
 
         valuation_logic = None
+        multiplier_disabled = False
         if current_ticker:
             try:
                 sug = get_sotp_suggested_multiple(current_ticker)
-                # Model B/C では suggested_multiple が None のため、スライダー用はフォールバック値を使用
-                default_mult = sug["suggested_multiple"] if sug.get("suggested_multiple") is not None else 6.0
+                default_mult = sug["suggested_multiple"] if sug.get("suggested_multiple") is not None else 8.0
                 sector_label = sug["sector_label"]
-                is_financial = sug["is_financial"]
-                is_investment_conglomerate = sug.get("is_investment_conglomerate", False)
+                multiplier_disabled = sug.get("multiplier_disabled", False)
                 valuation_logic = sug.get("valuation_logic")
             except Exception:
-                default_mult = 6.0
+                default_mult = 8.0
                 sector_label = "—"
-                is_financial = False
-                is_investment_conglomerate = False
         else:
-            default_mult = 6.0
+            default_mult = 8.0
             sector_label = "—"
-            is_financial = False
-            is_investment_conglomerate = False
 
         if current_ticker is not None and st.session_state.get("sotp_ticker") != current_ticker:
             st.session_state["sotp_ticker"] = current_ticker
             st.session_state["ebitda_mult"] = default_mult
-        if is_investment_conglomerate:
-            st.caption(f"{valuation_logic or 'Asset/Hybrid'} のため倍率スライダーは無効")
-            ebitda_mult = 10.0  # Model B/C では未使用
-        elif is_financial:
-            st.caption("金融のため BPS 法で計算（倍率スライダーは無効）")
-            ebitda_mult = 6.0  # 金融では未使用
+        if multiplier_disabled:
+            st.caption(f"{valuation_logic or 'ROE-linked PBR'} のため倍率スライダーは無効")
+            ebitda_mult = 8.0
         else:
             ebitda_mult = st.slider(
                 "EBITDA 倍率",
@@ -411,8 +404,61 @@ def main():
     # ----- 市場スキャンモード -----
     st.subheader("市場スキャンモード")
     st.caption(
-        f"対象: {len(TARGET_TICKERS)} 銘柄（日経225・乖離率20%以上 & 直近3日以内に買いパターン1つ以上）"
+        f"対象: {len(TARGET_TICKERS)} 銘柄（日経225）— "
+        "直近3日以内に「勝率・収益性の高いサイン」が1つ以上出た銘柄を抽出（バックテスト: 勝率50%以上・PF≥1.0・約定5回以上）。"
+        " 乖離率20%以上でさらに絞り込み。"
     )
+
+    # ----- 本日の買いシグナル（16:00想定＝X投稿と同じ内容） -----
+    st.divider()
+    st.subheader("本日の買いシグナル（16:00想定）")
+    st.caption(
+        "X 自動投稿（毎日16:00）と同じ条件で表示します。"
+        " 大引け日で買いサインが出た銘柄のみ（乖離率・AI判定は使わない）。最大3銘柄。"
+    )
+    if "daily_buy_signals" not in st.session_state:
+        st.session_state.daily_buy_signals = None
+    if "daily_buy_signals_text" not in st.session_state:
+        st.session_state.daily_buy_signals_text = None
+
+    col_refresh, _ = st.columns([1, 3])
+    with col_refresh:
+        if st.button("表示を更新", key="daily_signal_refresh"):
+            with st.spinner("日経225をスキャン中…（約2〜3分）"):
+                try:
+                    results_16 = scan_buy_signal_only()
+                    if results_16:
+                        results_16.sort(key=lambda x: x["signal_count"], reverse=True)
+                        picked = results_16[:3]
+                        tweet_text = build_tweet(picked)
+                        st.session_state.daily_buy_signals = picked
+                        st.session_state.daily_buy_signals_text = tweet_text
+                    else:
+                        st.session_state.daily_buy_signals = []
+                        st.session_state.daily_buy_signals_text = "本日は買いシグナル点灯銘柄はありませんでした。"
+                except Exception as e:
+                    st.session_state.daily_buy_signals = None
+                    st.session_state.daily_buy_signals_text = None
+                    st.error(f"スキャンエラー: {e}")
+            st.rerun()
+
+    if st.session_state.daily_buy_signals_text is not None:
+        st.text_area(
+            "X 投稿と同じフォーマット",
+            value=st.session_state.daily_buy_signals_text,
+            height=220,
+            disabled=True,
+            label_visibility="collapsed",
+        )
+        if st.session_state.daily_buy_signals:
+            st.caption("※機械的スクリーニング結果。投資判断は自己責任で。")
+            df_16 = pd.DataFrame(st.session_state.daily_buy_signals)
+            df_16 = df_16.rename(columns={"ticker": "銘柄コード", "name": "銘柄名", "buy_signals": "検出シグナル", "signal_count": "シグナル数"})
+            st.dataframe(df_16[["銘柄コード", "銘柄名", "検出シグナル", "シグナル数"]], hide_index=True, use_container_width=True)
+    else:
+        st.caption("「表示を更新」を押すと、X 投稿と同じ条件で本日の買いシグナルを取得します。")
+
+    st.divider()
 
     # スキャン中は進捗と中断ボタンを表示（スレッドで実行中のため）
     scan_thread = st.session_state.get("scan_thread")
@@ -511,6 +557,9 @@ def main():
                         enable_gemini_audit=api_ready,
                         streamlit_secrets=secrets_for_audit,
                         audit_progress_callback=on_audit_progress,
+                        holding_days=5,
+                        stop_loss_pct=0.05,
+                        min_win_rate=0.5,
                     )
                     shared["result"] = data
                     shared["stopped"] = shared.get("stop", False)
