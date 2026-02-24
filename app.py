@@ -2,9 +2,11 @@
 """
 Streamlit UI: SOTP理論株価 + 24種買い/26種売りパターン + 市場スクリーニング
 """
+import json
 import os
 import threading
 import time
+import urllib.request
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -421,7 +423,14 @@ def main():
     if "daily_buy_signals_text" not in st.session_state:
         st.session_state.daily_buy_signals_text = None
 
-    col_refresh, _ = st.columns([1, 3])
+    daily_json_url = os.environ.get("DAILY_SIGNALS_JSON_URL", "").strip()
+    if not daily_json_url:
+        try:
+            daily_json_url = (st.secrets.get("DAILY_SIGNALS_JSON_URL") or "").strip()
+        except Exception:
+            pass
+
+    col_refresh, col_fetch, _ = st.columns([1, 1, 2])
     with col_refresh:
         if st.button("表示を更新", key="daily_signal_refresh"):
             with st.spinner("日経225をスキャン中…（約2〜3分）"):
@@ -441,6 +450,22 @@ def main():
                     st.session_state.daily_buy_signals_text = None
                     st.error(f"スキャンエラー: {e}")
             st.rerun()
+    with col_fetch:
+        if daily_json_url and st.button("GitHub の結果を読み込み", key="daily_signal_fetch"):
+            try:
+                with urllib.request.urlopen(daily_json_url, timeout=10) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                picked = data.get("picked", [])
+                tweet_text = data.get("tweet_text", "")
+                st.session_state.daily_buy_signals = picked if isinstance(picked, list) else []
+                st.session_state.daily_buy_signals_text = tweet_text or "本日は買いシグナル点灯銘柄はありませんでした。"
+                st.success("読み込みました。")
+            except Exception as e:
+                st.error(f"読み込みエラー: {e}")
+            st.rerun()
+
+    if not daily_json_url:
+        st.caption("GitHub で自動更新された結果を表示するには、環境変数または Secrets で **DAILY_SIGNALS_JSON_URL** を設定してください（例: `https://raw.githubusercontent.com/ユーザ名/リポジトリ名/main/daily_buy_signals.json`）。")
 
     if st.session_state.daily_buy_signals_text is not None:
         st.text_area(
